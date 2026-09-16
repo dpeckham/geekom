@@ -7,7 +7,7 @@
 #
 #   host           the new box (LAN IP or hostname), reachable via SSH right now
 #   username       the non-root user created during the Debian install
-#   zfs-partition  raw, unformatted partition for Incus, e.g. /dev/nvme0n1p3
+#   zfs-partition  raw, unformatted partition for Incus, e.g. /dev/nvme0n1p4
 #   remote-name    what to call it in `incus remote` (default: box)
 #
 # What it does:

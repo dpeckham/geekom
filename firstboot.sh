@@ -2,7 +2,7 @@
 # First-boot setup: Debian 13 (trixie) headless -> ZFS + Tailscale + Incus
 #
 # Usage (as root):
-#   ./firstboot.sh /dev/nvme0n1p3 yourusername
+#   ./firstboot.sh /dev/nvme0n1p4 yourusername
 #
 #   arg1 = raw, unformatted partition to hand to Incus as a ZFS pool
 #   arg2 = your non-root login user (gets sudo + incus-admin)
