@@ -131,7 +131,8 @@ shows an empty shell.
 |------|---------|------|
 | `laptop-setup.sh` | laptop | installs pixels via mise, writes the pixels config + the `px-*` SSH block |
 | `base-setup.sh`   | container (root) | installs git, gh, mise, herdr, t3, and the agent CLIs |
-| `newbox.sh`       | laptop | clones the base, fixes up SSH, registers with herdr |
+| `newbox.sh`       | laptop | clones the base, fixes up SSH, seeds agent creds, registers with herdr |
+| `seed-agent-auth.sh` | laptop | copies this laptop's claude/codex credentials into a box |
 | `pixels-config.toml` / `pixels-ssh.conf` | laptop | the two config files the setup script installs |
 
 ### Why Debian, not Alpine or NixOS
@@ -177,8 +178,9 @@ pixels checkpoint create base --label ready
 ### Use it
 
 ```
-./newbox.sh foo                   # clone -> ssh ready -> registered with herdr
+./newbox.sh foo                   # clone -> ssh -> agent creds -> herdr
 ./newbox.sh foo --egress agent    # ...with the outbound allowlist on
+./newbox.sh foo --no-auth         # ...without seeding your agent credentials
 ```
 
 Cloning is a ZFS snapshot, so it takes about a second. Then:
@@ -244,6 +246,31 @@ container, which is why `curl`, `tar` and `sha256sum` are in the base image.
 From a phone the pairing flow (`t3 serve` + `t3 pair`) needs the device to
 reach `10.185.22.x`, which the LAN cannot — that path wants Tailscale in the
 container (`t3 pair --tailscale`).
+
+### Agent credentials
+
+`claude` and `codex` are both signed in from this laptop's credentials when a
+box is created, so there is nothing to log into per container.
+
+Neither tool can take its subscription auth from an env var in the sessions
+that matter here. Claude Code keeps it in the macOS Keychain (a plain file on
+Linux) and reads `~/.claude/.credentials.json` on the container; codex has no
+headless token for ChatGPT sign-in at all — only `--with-api-key`, which is a
+different billing path — so its `~/.codex/auth.json` has to be copied. That is
+all `seed-agent-auth.sh` does, streaming both straight over SSH so nothing is
+written to a temp file and no value is ever printed. Both land mode 600.
+
+Credentials are seeded per container rather than baked into the `ready`
+checkpoint, so the template stays credential-free and nothing long-lived sits
+in a ZFS snapshot that every clone inherits.
+
+**This hands live subscription tokens to anything with a shell on the box.**
+That is usually what you want on a box you drive yourself, and not what you
+want around an unattended agent — `./newbox.sh foo --no-auth` skips it, and
+`./seed-agent-auth.sh px-foo` can add them later.
+
+Re-seed an existing box the same way; the access token is short-lived and each
+container refreshes its own copy independently.
 
 ### How the laptop reaches a container
 

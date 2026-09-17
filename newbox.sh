@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
 # Spin up a project container from the dev base image.
 #
-#   ./newbox.sh <name> [--egress agent] [--no-herdr]
+#   ./newbox.sh <name> [--egress agent] [--no-herdr] [--no-auth]
 #
 # Clones px-base's `ready` checkpoint (a ZFS snapshot, so this is ~1s), clears
-# the stale SSH host key for a recycled name, waits for sshd, and registers the
-# box with herdr so it shows up in the sidebar on this laptop.
+# the stale SSH host key for a recycled name, waits for sshd, seeds the agent
+# credentials, and registers the box with herdr so it shows up in the sidebar
+# on this laptop.
+#
+# --no-auth skips the credential seeding. Use it for a box you do not trust
+# with your live Claude/ChatGPT subscription tokens -- anything running an
+# unattended agent behind --egress agent is a reasonable candidate, since an
+# agent with a shell can read those files.
 
 set -euo pipefail
 
-NAME="${1:?Usage: $0 <name> [--egress agent] [--no-herdr]}"; shift || true
+NAME="${1:?Usage: $0 <name> [--egress agent] [--no-herdr] [--no-auth]}"; shift || true
 EGRESS=""
 REGISTER_HERDR=1
+SEED_AUTH=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --egress) EGRESS="${2:?--egress needs a mode}"; shift 2 ;;
     --no-herdr) REGISTER_HERDR=0; shift ;;
+    --no-auth) SEED_AUTH=0; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE="${BASE:-base}"
 LABEL="${LABEL:-$NAME}"
 HOSTALIAS="px-$NAME"
@@ -51,6 +60,11 @@ if [[ -n "$EGRESS" ]]; then
   pixels network set "$NAME" "$EGRESS"
 fi
 
+if [[ $SEED_AUTH -eq 1 && -x "$HERE/seed-agent-auth.sh" ]]; then
+  step "Seeding agent credentials"
+  "$HERE/seed-agent-auth.sh" "$HOSTALIAS" || echo "    (seeding failed; run seed-agent-auth.sh $HOSTALIAS by hand)"
+fi
+
 if [[ $REGISTER_HERDR -eq 1 ]] && command -v herdr >/dev/null; then
   step "Registering with herdr"
   # A herdr server already running on the box makes `machine add` refuse, and a
@@ -65,3 +79,4 @@ step "Ready"
 echo "  ssh $HOSTALIAS"
 echo "  pixels console $NAME"
 echo "  t3:    ssh $HOSTALIAS 't3 serve --host 0.0.0.0'   # then t3 pair"
+[[ $SEED_AUTH -eq 1 ]] && echo "  agents: claude / codex authenticated from this laptop's credentials"
