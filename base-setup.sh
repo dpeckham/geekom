@@ -4,7 +4,8 @@
 #   incus file push base-setup.sh px-base/root/base-setup.sh
 #   incus exec px-base -- bash /root/base-setup.sh
 #
-# Installs git + gh + mise + herdr + t3 for the `pixel` user. Idempotent.
+# Installs git + gh + mise + herdr + t3 and the agent CLIs (claude-code,
+# codex, opencode) for the `pixel` user. Idempotent.
 #
 # Everything above the system layer goes through mise so there is exactly one
 # place to bump a version: /home/pixel/.config/mise/config.toml, which this
@@ -74,6 +75,14 @@ gh = "latest"
 
 # Agent control planes
 herdr = "latest"   # terminal workspace manager (aqua:ogulcancelik/herdr)
+
+# The agents themselves. herdr and T3 Code are control planes -- they drive
+# these and show an empty shell without them. pixels' own devtools step would
+# have installed this set, and it is disabled here (see pixels-config.toml),
+# so they have to be declared explicitly.
+claude-code = "latest"
+codex       = "latest"
+opencode    = "latest"
 
 # T3 Code comes from the vendor's release tarball, not npm. The npm package is
 # a launcher whose node-pty native module mise's npm backend does not fetch, so

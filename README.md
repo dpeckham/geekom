@@ -121,10 +121,16 @@ Tools inside the image are managed by mise, so versions live in one manifest
 (`/home/pixel/.config/mise/config.toml`, written by `base-setup.sh`) rather
 than being scattered across install commands.
 
+The image carries both the control planes (herdr, T3 Code) and the agents they
+drive (`claude-code`, `codex`, `opencode`). The agents are declared explicitly
+because `provision.devtools` is off — pixels would otherwise have installed
+that set, and without them T3 Code connects to a box with no providers and
+shows an empty shell.
+
 | File | Runs on | Does |
 |------|---------|------|
 | `laptop-setup.sh` | laptop | installs pixels via mise, writes the pixels config + the `px-*` SSH block |
-| `base-setup.sh`   | container (root) | installs git, gh, mise, herdr, t3 |
+| `base-setup.sh`   | container (root) | installs git, gh, mise, herdr, t3, and the agent CLIs |
 | `newbox.sh`       | laptop | clones the base, fixes up SSH, registers with herdr |
 | `pixels-config.toml` / `pixels-ssh.conf` | laptop | the two config files the setup script installs |
 
@@ -210,6 +216,23 @@ pinned by exact version**, because it is installed from a release tarball URL
 rather than a registry — bump `T3_VERSION` at the top of `base-setup.sh` and
 re-run. Check <https://github.com/pingdotgg/t3code/releases> for the current
 one.
+
+### Connecting T3 Code to a box
+
+In the T3 Code desktop app: Settings -> Connections -> Add environment -> SSH,
+and enter the bare alias (`px-foo`). No user, no IP.
+
+The app shells out to the system `ssh` — its bundle builds
+`ssh -o BatchMode=… -o ControlMaster=no` command lines and carries no JS ssh
+library — so it reads `~/.ssh/config` and the `px-*` block below applies,
+NAT and all. `BatchMode` forbids interactive prompts, so the hop has to work
+non-interactively; it does, with keys coming from the 1Password agent. On
+first connect the app installs its own runtime to `~/.t3/runtime` on the
+container, which is why `curl`, `tar` and `sha256sum` are in the base image.
+
+From a phone the pairing flow (`t3 serve` + `t3 pair`) needs the device to
+reach `10.185.22.x`, which the LAN cannot — that path wants Tailscale in the
+container (`t3 pair --tailscale`).
 
 ### How the laptop reaches a container
 
