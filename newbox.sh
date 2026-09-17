@@ -107,7 +107,7 @@ fi
 step "Ready"
 echo "  ssh $HOSTALIAS"
 echo "  pixels console $NAME"
-echo "  t3:    ssh $HOSTALIAS 't3 serve --host 0.0.0.0'   # then t3 pair"
+echo "  t3:    ./t3-connect.sh $HOSTALIAS"
 [[ $SEED_AUTH -eq 1 ]] && echo "  agents: claude / codex / gh authenticated from this laptop's credentials"
 for repo in ${REPOS+"${REPOS[@]}"}; do
   echo "  repo:   ~/code/${repo%%/*}/${repo##*/}"

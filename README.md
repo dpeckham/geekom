@@ -1,8 +1,19 @@
 # geekom — Incus dev box
 
-Headless Debian 13 (trixie) on a 32GB / 2TB NVMe machine. Incus manages
-LXC containers (and VMs if needed) on a ZFS pool. Everything is driven
-from the laptop with the `incus` CLI.
+Headless Debian 13 (trixie) on a 32GB / 2TB NVMe machine. Incus manages LXC
+containers (and VMs if needed) on a ZFS pool, and everything is driven from
+the laptop — nothing is typed on the box itself after provisioning.
+
+Day to day that means one command per project:
+
+```
+./newbox.sh eswitch --repo dpeckham/eswitch
+```
+
+which clones a prebuilt image, wires up SSH, signs in `claude` / `codex` /
+`gh`, checks out the repo and installs its toolchain, and registers the box
+with herdr — in a few seconds, because the clone is a ZFS snapshot. See
+**Dev base image**.
 
 ## Layout
 
@@ -12,11 +23,6 @@ from the laptop with the `incus` CLI.
 | p2        | 60 GB   | ext4 root      |
 | p3        | 8 GB    | swap           |
 | p4        | ~1.9 TB | ZFS pool `default` (owned by Incus) |
-
-Shared Incus volumes on the pool, mounted into every `dev`-profile container:
-
-- `cache` → `/cache` — package caches, model weights, anything big and reusable
-- `repos` → `/repos` — git checkouts
 
 Host is reachable as `geekom.local` (mDNS). Tailscale is installed but not
 enabled; run `sudo tailscale up --ssh` on the box if remote access is wanted.
@@ -63,53 +69,6 @@ incus remote switch box
 If it says the remote exists, `incus remote remove box` first. Tokens are
 single-use; make a new one if the old one is rejected.
 
-## Quick start: new dev container
-
-```
-incus launch images:debian/13 proj-foo --profile default --profile dev
-incus exec proj-foo -- bash
-```
-
-Inside: `/cache` and `/repos` are already mounted, networking works, limits
-are 4 CPU / 6GB from the `dev` profile. Docker inside the container is
-allowed (nesting is enabled).
-
-### Snapshot before letting an agent loose
-
-```
-incus snapshot create proj-foo clean      # take
-incus snapshot restore proj-foo clean     # roll back
-incus snapshot list proj-foo
-```
-
-### Everyday commands
-
-```
-incus list                                # what's running
-incus stop proj-foo / incus start proj-foo
-incus delete proj-foo --force             # gone (shared volumes survive)
-incus file push ./thing proj-foo/root/    # copy in
-incus file pull proj-foo/root/out.txt .   # copy out
-incus exec proj-foo -- <cmd>              # run one command
-incus config set proj-foo limits.memory=12GiB   # bump a limit
-```
-
-### Make a golden template
-
-For the scripted dev image see **Dev base image** above. By hand:
-
-```
-incus stop proj-base
-incus publish proj-base --alias dev-base
-incus launch dev-base proj-new --profile default --profile dev
-```
-
-### Need a VM instead (kernel isolation, awkward Docker stacks)
-
-```
-incus launch images:debian/13 proj-vm --vm --profile default -c limits.memory=8GiB
-```
-
 ## Dev base image
 
 Project containers are clones of one template: the `base` container's `ready`
@@ -132,7 +91,8 @@ shows an empty shell.
 | `laptop-setup.sh` | laptop | installs pixels via mise, writes the pixels config + the `px-*` SSH block |
 | `base-setup.sh`   | container (root) | installs git, gh, mise, herdr, t3, and the agent CLIs |
 | `newbox.sh`       | laptop | clones the base, fixes up SSH, seeds agent creds, registers with herdr |
-| `seed-agent-auth.sh` | laptop | copies this laptop's claude/codex credentials into a box |
+| `seed-agent-auth.sh` | laptop | copies this laptop's claude / codex / gh credentials into a box |
+| `t3-connect.sh`   | laptop | connects the T3 Code client to a box from the CLI |
 | `pixels-config.toml` / `pixels-ssh.conf` | laptop | the two config files the setup script installs |
 
 ### Why Debian, not Alpine or NixOS
@@ -211,12 +171,50 @@ pixels console foo                # no SSH at all; native Incus exec
 pixels list / pixels destroy foo
 ```
 
-For T3 Code, run the server on the box and pair from the laptop or phone:
+Connect T3 Code to it with:
 
 ```
-ssh px-foo 't3 serve --host 0.0.0.0'   # :3773
-ssh px-foo 't3 pair'                   # prints a pairing link/QR
+./t3-connect.sh px-foo            # server + tunnel + pairing, all from the CLI
 ```
+
+See **Connecting T3 Code to a box**.
+
+### Worked examples
+
+Two boxes in real use, and the non-obvious things each one turned up.
+
+**`px-emaax` — `Electromaax/E-MAAX-V`**, a multi-language monorepo (ESP32
+firmware via PlatformIO/ESP-IDF, a Vite web UI baked into the firmware image,
+Python tooling, Android, iOS).
+
+```
+./newbox.sh emaax --repo Electromaax/E-MAAX-V
+```
+
+- The web build (`just build-web`) and the firmware build (`just
+  build-firmware`, ~2 min including the one-off ESP-IDF toolchain download)
+  both work; `just test-html` passes 485 tests.
+- `pytest` is not declared in that repo's `mise.toml` — only in
+  `tests/e2e/requirements.txt` — so `just test-host` fails on a clean machine
+  until those are installed.
+- The repo documents a `setuptools<81` pin for PlatformIO's venv. It is
+  manual, and any `mise install` that rebuilds that venv silently re-breaks
+  the firmware build until it is reapplied.
+- iOS/Swift cannot build here, and the device-backed E2E suites need the real
+  board (`EMAAX_DEVICE_URL` can point at one proxied elsewhere on the LAN).
+
+**`px-eswitch` — `dpeckham/eswitch`**, a KiCad 10 hardware project.
+
+```
+./newbox.sh eswitch --repo dpeckham/eswitch
+```
+
+- KiCad ships as an AppImage. It runs fine in the container despite there
+  being no SUID `fusermount`: it prints `trying to unshare...` and falls back
+  to user namespaces.
+- The repo puts its `bin/` shim on PATH with mise's `[env] _.path`, which the
+  activate hook only applies in interactive shells — so `just` and
+  `kicad-cli` need `mise exec --` over SSH (see **Repo layout**).
 
 ### Updating the image
 
@@ -241,9 +239,30 @@ one.
 
 ### Connecting T3 Code to a box
 
-Unlike herdr, which `newbox.sh` registers for you via `herdr machine add`,
-this is a manual step: T3 keeps its environments in an encrypted
-`connection-catalog.json` with no CLI to add one.
+```
+./t3-connect.sh px-foo
+```
+
+That starts a t3 server on the box, tunnels it to `localhost:3799`, mints a
+pairing token and opens the client on the pairing URL. The server binds
+**loopback inside the container**, so it is reachable only through the tunnel
+— not from other containers on the bridge, and not from the LAN. (`t3 serve
+--host 0.0.0.0`, which the docs suggest, exposes it to both.)
+
+Two details it works around: `t3 pair` prints a URL pointing at the
+container's bridge IP, which this laptop cannot route to, so the script keeps
+the token and rebuilds the URL against the tunnel; and the tunnel's
+descriptors are detached, because `ssh -f -N` backgrounds itself but inherits
+stdout and hangs anything capturing the script's output.
+
+Drop the tunnel with `pkill -f 'ssh -f -N -L 3799:127.0.0.1:3773'`.
+
+#### Or through the app's SSH environment
+
+This is the GUI equivalent and cannot be scripted — T3 keeps its environments
+in an encrypted `connection-catalog.json` and registers only a `t3code://app`
+deep link, with no pairing URL form. Unlike herdr, which `newbox.sh` registers
+for you via `herdr machine add`, there is no `t3 ... add` to call.
 
 In the T3 Code desktop app: Settings -> Connections -> Add environment -> SSH,
 and enter the alias (`px-foo`, or `pixel@px-foo`) — **not** the IP that
@@ -379,13 +398,67 @@ One non-issue worth recording, since it looks alarming: under `--egress agent`,
 pixels deliberately replaces blanket `NOPASSWD` sudo with a restricted list so
 an agent cannot disable nftables; use `sudo safe-apt` instead.
 
+## Working with Incus directly
+
+Everything above goes through pixels. These are the underlying commands, for
+one-off containers and for digging into what pixels built.
+
+`firstboot.sh` also creates a `dev` profile (4 CPU / 6GB, nesting on) and two
+shared volumes on the pool — `cache` → `/cache` and `repos` → `/repos`. Both
+predate the pixels workflow and nothing uses them now (`incus profile list`
+shows `dev` at 0), since pixels containers are deliberately self-contained.
+They are kept because they are the right shape for a hand-rolled container
+that wants storage shared with its siblings.
+
+```
+incus launch images:debian/13 proj-foo --profile default --profile dev
+incus exec proj-foo -- bash
+```
+
+### Snapshot before letting an agent loose
+
+```
+incus snapshot create proj-foo clean      # take
+incus snapshot restore proj-foo clean     # roll back
+incus snapshot list proj-foo
+```
+
+### Everyday commands
+
+```
+incus list                                # what's running
+incus stop proj-foo / incus start proj-foo
+incus delete proj-foo --force             # gone (shared volumes survive)
+incus file push ./thing proj-foo/root/    # copy in
+incus file pull proj-foo/root/out.txt .   # copy out
+incus exec proj-foo -- <cmd>              # run one command
+incus config set proj-foo limits.memory=12GiB   # bump a limit
+```
+
+### Make a golden template by hand
+
+The scripted path is **Dev base image** above; this is the manual equivalent:
+
+```
+incus stop proj-base
+incus publish proj-base --alias dev-base
+incus launch dev-base proj-new --profile default --profile dev
+```
+
+### Need a VM instead (kernel isolation, awkward Docker stacks)
+
+```
+incus launch images:debian/13 proj-vm --vm --profile default -c limits.memory=8GiB
+```
+
 ## Maintenance
 
 - Host updates: `ssh geekom.local`, `sudo apt update && sudo apt full-upgrade`.
   A kernel update triggers a ZFS DKMS rebuild; reboot after.
 - Pool health: `sudo zpool status` on the box.
-- Backups: `incus export proj-foo proj-foo.tar.gz` for a container;
-  `incus storage volume export default repos repos.tar.gz` for shared data.
+- Backups: `incus export px-emaax emaax.tar.gz` for a whole container.
+  Project boxes are cheap to rebuild from `newbox.sh`, so what is worth
+  backing up is whatever has not been pushed to its remote yet.
 - Dev image: see **Updating the image** above; the host's `apt full-upgrade`
   does not touch containers.
 - If the box's IP changes and the remote is pinned to it:
