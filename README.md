@@ -220,7 +220,18 @@ one.
 ### Connecting T3 Code to a box
 
 In the T3 Code desktop app: Settings -> Connections -> Add environment -> SSH,
-and enter the bare alias (`px-foo`). No user, no IP.
+and enter the alias (`px-foo`, or `pixel@px-foo`) — **not** the IP that
+`pixels list` prints.
+
+An IP does not match the `Host px-*` pattern, so ssh applies no ProxyCommand
+and tries the NAT'd bridge directly, which fails like this:
+
+```
+Could not prepare the SSH environment: ... SshCommandError:
+ssh: connect to host 10.185.22.87 port 22: Operation timed out
+```
+
+The fix is always to use the alias, which is what pulls in the hop.
 
 The app shells out to the system `ssh` — its bundle builds
 `ssh -o BatchMode=… -o ControlMaster=no` command lines and carries no JS ssh
