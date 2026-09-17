@@ -112,10 +112,14 @@ incus launch images:debian/13 proj-vm --vm --profile default -c limits.memory=8G
 
 ## Dev base image
 
-Project containers come from a `dev-base` image built once and cloned per
-project. [pixels](https://github.com/deevus/pixels) drives the lifecycle: it
-talks to this box's Incus daemon over HTTPS from the laptop, snapshots with
+Project containers are clones of one template: the `base` container's `ready`
+checkpoint. [pixels](https://github.com/deevus/pixels) drives the lifecycle —
+it talks to this box's Incus daemon over HTTPS from the laptop, snapshots with
 ZFS, and can put an nftables egress allowlist around each container.
+
+Tools inside the image are managed by mise, so versions live in one manifest
+(`/home/pixel/.config/mise/config.toml`, written by `base-setup.sh`) rather
+than being scattered across install commands.
 
 | File | Runs on | Does |
 |------|---------|------|
@@ -155,10 +159,12 @@ incus exec px-base -- bash /root/base-setup.sh
 ```
 
 Then finalise and snapshot. Removing the host keys is what lets each clone
-generate its own identity on first boot:
+generate its own identity on first boot. Quote the glob — unquoted, your local
+shell expands it against the laptop's `/etc/ssh` and the container's keys are
+never touched:
 
 ```
-incus exec px-base -- rm -f /root/base-setup.sh /etc/ssh/ssh_host_*
+incus exec px-base -- bash -c 'rm -f /root/base-setup.sh /etc/ssh/ssh_host_*'
 pixels checkpoint create base --label ready
 ```
 
@@ -183,6 +189,27 @@ For T3 Code, run the server on the box and pair from the laptop or phone:
 ssh px-foo 't3 serve --host 0.0.0.0'   # :3773
 ssh px-foo 't3 pair'                   # prints a pairing link/QR
 ```
+
+### Updating the image
+
+`base-setup.sh` is idempotent, so updating means re-running it on the template
+and taking a fresh checkpoint. Existing project containers are unaffected —
+they are already-diverged clones.
+
+```
+pixels start base || true                          # errors if already running
+incus file push base-setup.sh px-base/root/base-setup.sh
+incus exec px-base -- bash /root/base-setup.sh
+incus exec px-base -- bash -c 'rm -f /root/base-setup.sh /etc/ssh/ssh_host_*'
+pixels checkpoint delete base ready
+pixels checkpoint create base --label ready
+```
+
+`gh`, `herdr` and `node` are pinned to `latest` and move on their own. **t3 is
+pinned by exact version**, because it is installed from a release tarball URL
+rather than a registry — bump `T3_VERSION` at the top of `base-setup.sh` and
+re-run. Check <https://github.com/pingdotgg/t3code/releases> for the current
+one.
 
 ### How the laptop reaches a container
 
@@ -229,16 +256,37 @@ chain is `policy drop` on an `inet` table, so IPv6 is dropped rather than
 allowed through (fail-closed, and moot here since the bridge hands out a ULA
 with no upstream route).
 
-### Known pixels bug (0.6.2)
+### Gotchas
 
-Leave `provision.devtools = false`. With it enabled, the Incus backend pushes
+Three things here were found the hard way and will look like unrelated
+breakage if you hit them cold.
+
+**pixels 0.6.2 silently half-provisions.** Leave `provision.devtools = false`.
+With it enabled, the Incus backend pushes
 `/home/pixel/.config/mise/config.toml` without creating the parent directory;
 the Incus file API does not create parents, and the error is discarded by
-`_ = err` in `sandbox/incus/backend.go`. Provisioning then aborts *before*
-`rc.local` runs, so the container silently comes up with no `pixel` user and
-no sshd, while `pixels create` still reports success. `base-setup.sh` installs
-a fuller toolchain than the devtools step would anyway.
+`_ = err` in `sandbox/incus/backend.go`. Provisioning aborts *before*
+`rc.local` runs, so the container comes up with no `pixel` user and no sshd
+while `pixels create` still reports success. `base-setup.sh` installs a fuller
+toolchain than the devtools step would anyway.
 
+**t3 must not be installed from npm.** mise's npm backend does not fetch
+node-pty's native module, so `npm:t3` yields a `t3` that answers
+`t3 --version` but dies on `t3 serve` with "Failed to load native module:
+pty.node". The vendor's release tarball ships `build/Release/pty.node` and its
+own client assets, so it is installed through mise's `http` backend with
+`bin_path` pointing at the extracted directory rather than a lone binary.
+
+**Do not stop persisting SSH host keys.** Every clone regenerating its own host
+key (see above) makes `~/.ssh/known_hosts.pixels` go stale whenever a name is
+reused, and the obvious fix — `UserKnownHostsFile=/dev/null` — breaks
+`herdr machine add` with "lost connection to server". `newbox.sh` clears the
+stale entry at create time instead.
+
+One non-issue worth recording, since it looks alarming: under `--egress agent`,
+`sudo apt-get update` fails with a password prompt. That is not the firewall.
+pixels deliberately replaces blanket `NOPASSWD` sudo with a restricted list so
+an agent cannot disable nftables; use `sudo safe-apt` instead.
 
 ## Maintenance
 
@@ -247,5 +295,7 @@ a fuller toolchain than the devtools step would anyway.
 - Pool health: `sudo zpool status` on the box.
 - Backups: `incus export proj-foo proj-foo.tar.gz` for a container;
   `incus storage volume export default repos repos.tar.gz` for shared data.
+- Dev image: see **Updating the image** above; the host's `apt full-upgrade`
+  does not touch containers.
 - If the box's IP changes and the remote is pinned to it:
   `incus remote set-url box https://geekom.local:8443`
