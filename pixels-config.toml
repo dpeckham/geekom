@@ -1,0 +1,49 @@
+# pixels -> the geekom Incus daemon.
+#
+# Install to the path Go's os.UserConfigDir() reports, which on macOS is
+# ~/Library/Application Support/pixels/config.toml (NOT ~/.config/pixels).
+# laptop-setup.sh keeps the real file in ~/.config/pixels and symlinks it there.
+backend = "incus"
+
+[incus]
+# Reached over mDNS so a new DHCP lease on the box does not break the config.
+# TLS is pinned to the cert incus already trusts, so the hostname is not
+# security-relevant here.
+remote      = "https://geekom.local:8443"
+client_cert = "~/Library/Application Support/incus/client.crt"
+client_key  = "~/Library/Application Support/incus/client.key"
+server_cert = "~/Library/Application Support/incus/servercerts/box.crt"
+project     = "default"
+
+[defaults]
+image   = "debian/13"      # matches the host; glibc (see README on Alpine/NixOS)
+cpu     = "4"
+memory  = 6144
+pool    = "default"
+network = "incusbr0"
+
+[ssh]
+user = "pixel"
+key  = "~/.ssh/id_ed25519"
+
+[provision]
+enabled = true
+# pixels' own devtools step is broken on the Incus backend in 0.6.2: it pushes
+# /home/pixel/.config/mise/config.toml without creating the parent directory,
+# the Incus file API will not create parents, and the resulting error is
+# swallowed by `_ = err` in sandbox/incus/backend.go. That aborts provisioning
+# before rc.local runs, so the container silently ends up with no pixel user
+# and no sshd. base-setup.sh installs a richer toolchain anyway.
+devtools = false
+
+[network]
+egress = "unrestricted"    # per-container: pixels create --egress agent
+# The built-in `agent` preset allowlists archive.ubuntu.com / security.ubuntu.com
+# but no Debian mirrors, so apt breaks on a Debian base under restricted egress.
+# herdr.dev and t3.codes are the control planes' own update/pairing hosts and
+# are not in the preset, so `herdr machine add` and t3 pairing fail without
+# them (verified: both return 000 under the stock agent preset).
+allow = [
+  "deb.debian.org", "security.debian.org",
+  "herdr.dev", "t3.codes",
+]

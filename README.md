@@ -96,7 +96,7 @@ incus config set proj-foo limits.memory=12GiB   # bump a limit
 
 ### Make a golden template
 
-Set up a container the way you like (toolchain, dotfiles, agent CLIs), then:
+For the scripted dev image see **Dev base image** above. By hand:
 
 ```
 incus stop proj-base
@@ -109,6 +109,136 @@ incus launch dev-base proj-new --profile default --profile dev
 ```
 incus launch images:debian/13 proj-vm --vm --profile default -c limits.memory=8GiB
 ```
+
+## Dev base image
+
+Project containers come from a `dev-base` image built once and cloned per
+project. [pixels](https://github.com/deevus/pixels) drives the lifecycle: it
+talks to this box's Incus daemon over HTTPS from the laptop, snapshots with
+ZFS, and can put an nftables egress allowlist around each container.
+
+| File | Runs on | Does |
+|------|---------|------|
+| `laptop-setup.sh` | laptop | installs pixels via mise, writes the pixels config + the `px-*` SSH block |
+| `base-setup.sh`   | container (root) | installs git, gh, mise, herdr, t3 |
+| `newbox.sh`       | laptop | clones the base, fixes up SSH, registers with herdr |
+| `pixels-config.toml` / `pixels-ssh.conf` | laptop | the two config files the setup script installs |
+
+### Why Debian, not Alpine or NixOS
+
+The toolchain decides this. Every tool here is a prebuilt binary fetched at
+runtime, and only one of them is portable:
+
+| Tool | Linux build | musl (Alpine) | NixOS |
+|------|-------------|---------------|-------|
+| herdr | static-pie musl | works | works |
+| t3    | dynamic, needs `GLIBC_2.28`+ | **no** | needs `nix-ld` |
+| mise runtimes | prebuilt glibc node/python | **no** | needs `nix-ld` |
+
+`t3` links `/lib64/ld-linux-x86-64.so.2` and bundles only
+`@yuuang/ffi-rs-linux-x64-gnu` — there is no musl build to fall back to, and
+its installer picks on `uname -s`/`uname -m` alone. Alpine would cost t3
+entirely to save ~80MB on a 1.9TB pool. NixOS fails for the same reason
+(no `/lib64/ld-linux-x86-64.so.2`), and since mise would still be managing the
+toolchain, its declarative half would only cover git, openssh and nix-ld.
+
+Debian 13 matches the host and ships a newer git than Ubuntu 24.04 (2.47 vs
+2.43). Swap `defaults.image` in `pixels-config.toml` to change it.
+
+### Build it
+
+```
+./laptop-setup.sh                 # once per laptop
+pixels create base
+incus file push base-setup.sh px-base/root/base-setup.sh
+incus exec px-base -- bash /root/base-setup.sh
+```
+
+Then finalise and snapshot. Removing the host keys is what lets each clone
+generate its own identity on first boot:
+
+```
+incus exec px-base -- rm -f /root/base-setup.sh /etc/ssh/ssh_host_*
+pixels checkpoint create base --label ready
+```
+
+### Use it
+
+```
+./newbox.sh foo                   # clone -> ssh ready -> registered with herdr
+./newbox.sh foo --egress agent    # ...with the outbound allowlist on
+```
+
+Cloning is a ZFS snapshot, so it takes about a second. Then:
+
+```
+ssh px-foo                        # via ProxyJump through geekom
+pixels console foo                # no SSH at all; native Incus exec
+pixels list / pixels destroy foo
+```
+
+For T3 Code, run the server on the box and pair from the laptop or phone:
+
+```
+ssh px-foo 't3 serve --host 0.0.0.0'   # :3773
+ssh px-foo 't3 pair'                   # prints a pairing link/QR
+```
+
+### How the laptop reaches a container
+
+Containers live on `incusbr0` (10.185.22.0/24), NAT'd behind geekom and not
+routable from the laptop. `pixels console` sidesteps this entirely (Incus exec
+API over HTTPS), but herdr and t3 both need real SSH, so `pixels-ssh.conf`
+hops through the box:
+
+```
+ProxyCommand ssh dpeckham@geekom.local 'nc $(dig +short %h.incus @10.185.22.1 | head -n1) 22'
+```
+
+The box has no systemd-resolved, so its own resolver cannot be taught the
+`.incus` zone; asking the bridge's dnsmasq directly avoids configuring
+anything on the box and keeps container IPs dynamic.
+
+Host keys are kept in `~/.ssh/known_hosts.pixels`. Since every clone
+regenerates its host key and names get recycled, `newbox.sh` clears the stale
+entry on each create. Do not set `UserKnownHostsFile=/dev/null` to avoid that
+— `herdr machine add` fails with "lost connection to server" when host keys
+are not persisted.
+
+Agent forwarding is deliberately off: these containers run AI coding agents,
+and forwarding the 1Password agent would hand them your keys. Use `gh auth
+login` or a scoped deploy key inside the container.
+
+### Egress allowlist
+
+`--egress agent` installs an nftables ruleset (default `policy drop`, with the
+resolved allowlist in an `allowed_v4` set) and swaps the blanket `NOPASSWD`
+sudo for a restricted one, so an agent cannot switch the firewall off. Package
+installs then go through the wrapper rather than apt directly:
+
+```
+sudo safe-apt update
+```
+
+The stock preset covers the AI APIs, npm/PyPI/crates/Go, GitHub and the Ubuntu
+mirrors. `pixels-config.toml` adds what this setup needs on top:
+`deb.debian.org` and `security.debian.org` (the preset has only Ubuntu
+mirrors), plus `herdr.dev` and `t3.codes` — without those two,
+`herdr machine add` and t3 pairing fail. Note the allowlist is IPv4-only; the
+chain is `policy drop` on an `inet` table, so IPv6 is dropped rather than
+allowed through (fail-closed, and moot here since the bridge hands out a ULA
+with no upstream route).
+
+### Known pixels bug (0.6.2)
+
+Leave `provision.devtools = false`. With it enabled, the Incus backend pushes
+`/home/pixel/.config/mise/config.toml` without creating the parent directory;
+the Incus file API does not create parents, and the error is discarded by
+`_ = err` in `sandbox/incus/backend.go`. Provisioning then aborts *before*
+`rc.local` runs, so the container silently comes up with no `pixel` user and
+no sshd, while `pixels create` still reports success. `base-setup.sh` installs
+a fuller toolchain than the devtools step would anyway.
+
 
 ## Maintenance
 
