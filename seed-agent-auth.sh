@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy this laptop's agent credentials into a dev container.
+# Copy this laptop's agent + GitHub credentials into a dev container.
 #
 #   ./seed-agent-auth.sh px-foo
 #
@@ -62,5 +62,19 @@ else
   warn "no ~/.codex/auth.json; run 'codex login' on this laptop first"
 fi
 
+# ----------------------------------------------------------------------- gh
+# The base image ships gh but no credentials, so a fresh box cannot clone a
+# private repo. The laptop keeps its token in the macOS keyring, so pull it
+# out with `gh auth token` and hand it to the container over stdin -- never as
+# an argv value, which would be visible in the container's process list.
+step "gh"
+if command -v gh >/dev/null && gh_token=$(gh auth token 2>/dev/null) && [[ -n "$gh_token" ]]; then
+  printf '%s' "$gh_token" | ssh -o BatchMode=yes "$BOX" \
+    'gh auth login --hostname github.com --with-token >/dev/null 2>&1 && gh auth setup-git >/dev/null 2>&1'
+  echo "    seeded ($(ssh -o BatchMode=yes "$BOX" 'gh auth status 2>&1 | grep -oE "account [^ ]+" | head -1' 2>/dev/null))"
+else
+  warn "no gh token on this laptop; run 'gh auth login' here first"
+fi
+
 step "Done"
-echo "Verify with:  ssh $BOX 'codex login status'"
+echo "Verify with:  ssh $BOX 'codex login status; gh auth status'"

@@ -179,8 +179,28 @@ pixels checkpoint create base --label ready
 
 ```
 ./newbox.sh foo                   # clone -> ssh -> agent creds -> herdr
+./newbox.sh foo --repo dpeckham/eswitch          # ...with a repo checked out
+./newbox.sh foo --repo qhcorp/api --repo qhcorp/web   # ...several
 ./newbox.sh foo --egress agent    # ...with the outbound allowlist on
 ./newbox.sh foo --no-auth         # ...without seeding your agent credentials
+```
+
+### Repo layout
+
+`--repo org/name` is repeatable and checks out to `~/code/<org>/<name>` inside
+the container, mirroring the laptop. Keeping the org level matters once a box
+holds more than one repo: paths match muscle memory, anything in a repo that
+refers to a sibling by relative path still resolves, and two repos sharing a
+name in different orgs do not collide. Each clone with a `mise.toml` is
+trusted and its toolchain installed.
+
+A per-project `[env]` in a repo's `mise.toml` — `_.path = ["bin"]` and the
+like — is applied by mise's activate hook, which fires in interactive shells
+only. `ssh box 'kicad-cli …'` will not see it. Use `mise exec --` for
+non-interactive invocations:
+
+```
+ssh px-eswitch 'cd ~/code/dpeckham/eswitch && mise exec -- just erc'
 ```
 
 Cloning is a ZFS snapshot, so it takes about a second. Then:
@@ -221,6 +241,10 @@ one.
 
 ### Connecting T3 Code to a box
 
+Unlike herdr, which `newbox.sh` registers for you via `herdr machine add`,
+this is a manual step: T3 keeps its environments in an encrypted
+`connection-catalog.json` with no CLI to add one.
+
 In the T3 Code desktop app: Settings -> Connections -> Add environment -> SSH,
 and enter the alias (`px-foo`, or `pixel@px-foo`) — **not** the IP that
 `pixels list` prints.
@@ -249,10 +273,16 @@ container (`t3 pair --tailscale`).
 
 ### Agent credentials
 
-`claude` and `codex` are both signed in from this laptop's credentials when a
-box is created, so there is nothing to log into per container.
+`claude`, `codex` and `gh` are all signed in from this laptop's credentials
+when a box is created, so there is nothing to log into per container. `gh`
+matters for `--repo`: the template ships the CLI but no token, so without
+seeding a fresh box cannot clone a private repo.
 
-Neither tool can take its subscription auth from an env var in the sessions
+The `gh` token comes from `gh auth token` (the laptop keeps it in the keyring)
+and is handed over stdin, never as an argv value that would show up in the
+container's process list.
+
+Neither agent tool can take its subscription auth from an env var in the sessions
 that matter here. Claude Code keeps it in the macOS Keychain (a plain file on
 Linux) and reads `~/.claude/.credentials.json` on the container; codex has no
 headless token for ChatGPT sign-in at all — only `--with-api-key`, which is a

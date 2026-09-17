@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spin up a project container from the dev base image.
 #
-#   ./newbox.sh <name> [--egress agent] [--no-herdr] [--no-auth]
+#   ./newbox.sh <name> [--repo org/repo]... [--egress agent] [--no-herdr] [--no-auth]
 #
 # Clones px-base's `ready` checkpoint (a ZFS snapshot, so this is ~1s), clears
 # the stale SSH host key for a recycled name, waits for sshd, seeds the agent
@@ -15,15 +15,17 @@
 
 set -euo pipefail
 
-NAME="${1:?Usage: $0 <name> [--egress agent] [--no-herdr] [--no-auth]}"; shift || true
+NAME="${1:?Usage: $0 <name> [--repo org/repo]... [--egress agent] [--no-herdr] [--no-auth]}"; shift || true
 EGRESS=""
 REGISTER_HERDR=1
 SEED_AUTH=1
+REPOS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --egress) EGRESS="${2:?--egress needs a mode}"; shift 2 ;;
     --no-herdr) REGISTER_HERDR=0; shift ;;
     --no-auth) SEED_AUTH=0; shift ;;
+    --repo) REPOS+=("${2:?--repo needs org/repo}"); shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -65,6 +67,33 @@ if [[ $SEED_AUTH -eq 1 && -x "$HERE/seed-agent-auth.sh" ]]; then
   "$HERE/seed-agent-auth.sh" "$HOSTALIAS" || echo "    (seeding failed; run seed-agent-auth.sh $HOSTALIAS by hand)"
 fi
 
+# Repos land at ~/code/<org>/<repo>, mirroring the laptop. Keeping the org
+# level means paths match muscle memory, anything in a repo that refers to a
+# sibling by path still resolves, and two repos sharing a name across orgs do
+# not collide in a multi-repo box.
+for repo in ${REPOS+"${REPOS[@]}"}; do
+  org="${repo%%/*}"; name="${repo##*/}"
+  if [[ "$org" == "$repo" || -z "$name" ]]; then
+    echo "    --repo wants org/repo, got: $repo"; exit 1
+  fi
+  step "Cloning $repo -> ~/code/$org/$name"
+  ssh -o BatchMode=yes "$HOSTALIAS" "
+    set -e
+    mkdir -p ~/code/$org
+    if [ -d ~/code/$org/$name/.git ]; then
+      echo '    already present'
+    else
+      gh repo clone $repo ~/code/$org/$name -- --quiet
+    fi
+    cd ~/code/$org/$name
+    if [ -f mise.toml ] || [ -f .mise.toml ]; then
+      mise trust --yes . >/dev/null 2>&1 || true
+      echo '    installing toolchain...'
+      mise install --yes 2>&1 | tail -3
+    fi
+  "
+done
+
 if [[ $REGISTER_HERDR -eq 1 ]] && command -v herdr >/dev/null; then
   step "Registering with herdr"
   # A herdr server already running on the box makes `machine add` refuse, and a
@@ -79,4 +108,7 @@ step "Ready"
 echo "  ssh $HOSTALIAS"
 echo "  pixels console $NAME"
 echo "  t3:    ssh $HOSTALIAS 't3 serve --host 0.0.0.0'   # then t3 pair"
-[[ $SEED_AUTH -eq 1 ]] && echo "  agents: claude / codex authenticated from this laptop's credentials"
+[[ $SEED_AUTH -eq 1 ]] && echo "  agents: claude / codex / gh authenticated from this laptop's credentials"
+for repo in ${REPOS+"${REPOS[@]}"}; do
+  echo "  repo:   ~/code/${repo%%/*}/${repo##*/}"
+done
